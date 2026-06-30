@@ -96,6 +96,8 @@ APP_ENV_B64   arquivo .env de producao codificado em base64
 
 Opcionalmente, use `VPS_SSH_PORT` se o SSH nao estiver na porta `22`.
 
+Como o repositorio pode ser privado, a VPS tambem precisa de uma deploy key de leitura no GitHub. A chave privada fica somente na VPS em `~/.ssh/board_pmo_github`; a chave publica deve ser cadastrada no repositorio como deploy key read-only. O workflow usa o remoto SSH `git@github.com:rogeriomind/board_pmo.git` para o `git pull`.
+
 O `.env` de producao deve seguir `.env.example`, usando `DATA_DRIVER="prisma"`, `VITE_API_URL="/api"` e `DATABASE_URL` apontando para o host Docker `postgres`, por exemplo:
 
 ```env
