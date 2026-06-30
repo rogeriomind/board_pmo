@@ -1,0 +1,22 @@
+{
+  "name": "pmo-board",
+  "private": true,
+  "version": "1.0.0",
+  "description": "PMO Board full-stack Kanban application",
+  "workspaces": [
+    "apps/*"
+  ],
+  "scripts": {
+    "dev": "concurrently -n api,web -c cyan,magenta \"dotenv -e .env -- npm run dev -w @pmo-board/api\" \"dotenv -e .env -- npm run dev -w @pmo-board/web\"",
+    "build": "npm run build -w @pmo-board/api && npm run build -w @pmo-board/web",
+    "typecheck": "npm run typecheck -w @pmo-board/api && npm run typecheck -w @pmo-board/web",
+    "db:generate": "dotenv -e .env -- npm run prisma:generate -w @pmo-board/api",
+    "db:push": "dotenv -e .env -- npm run prisma:push -w @pmo-board/api",
+    "db:seed": "dotenv -e .env -- npm run prisma:seed -w @pmo-board/api",
+    "db:studio": "dotenv -e .env -- npm run prisma:studio -w @pmo-board/api"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.2",
+    "dotenv-cli": "^8.0.0"
+  }
+}
