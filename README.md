@@ -83,6 +83,13 @@ Arquitetura em producao:
 - `api`: Node/Express na porta interna `3333`.
 - `postgres`: PostgreSQL 16 com volume Docker persistente.
 
+Se a mesma VPS tambem hospeda outro backend/site, como `pmo_agent`, nao deixe dois projetos publicarem a mesma porta do host. Mantenha apenas um proxy publico na `80/443` ou altere `WEB_PORT` do Board para uma porta livre. Para deixar o Board acessivel somente para um proxy local, use por exemplo:
+
+```env
+WEB_HOST="127.0.0.1"
+WEB_PORT=8081
+```
+
 ### Secrets do GitHub Actions
 
 Crie estes secrets no repositorio:
@@ -110,8 +117,27 @@ PORT=3333
 CORS_ORIGIN="http://IP_DA_VPS"
 VITE_API_URL="/api"
 DATA_DRIVER="prisma"
+WEB_HOST="0.0.0.0"
 WEB_PORT=80
 SEED_DEFAULT_PASSWORD="senha-inicial-admin"
+```
+
+### Diagnostico rapido de indisponibilidade
+
+Na VPS, rode:
+
+```bash
+cd /opt/board_pmo
+docker compose ps
+docker compose logs --tail=120 web api
+sudo ss -ltnp | grep -E ':(80|443|3333|8081)\b'
+curl -i http://127.0.0.1:${WEB_PORT:-80}/api/health
+```
+
+Se aparecer conflito de porta ou se outro servico estiver ocupando a `80`, ajuste `WEB_HOST`/`WEB_PORT` no `.env` de producao e suba novamente:
+
+```bash
+docker compose up -d --build
 ```
 
 Para gerar o valor de `APP_ENV_B64` no PowerShell:

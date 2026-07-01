@@ -1,5 +1,6 @@
 const API_URL = import.meta.env.VITE_API_URL ?? "http://localhost:3333/api";
 const TOKEN_KEY = "pmo-board-token";
+export const AUTH_EXPIRED_EVENT = "pmo-board:auth-expired";
 
 export class ApiError extends Error {
   status: number;
@@ -22,6 +23,10 @@ export function setToken(token: string) {
 
 export function clearToken() {
   localStorage.removeItem(TOKEN_KEY);
+}
+
+function notifyAuthExpired() {
+  window.dispatchEvent(new Event(AUTH_EXPIRED_EVENT));
 }
 
 export async function apiRequest<T>(path: string, options: RequestInit = {}): Promise<T> {
@@ -48,6 +53,11 @@ export async function apiRequest<T>(path: string, options: RequestInit = {}): Pr
   const payload = await response.json().catch(() => ({}));
 
   if (!response.ok) {
+    if (response.status === 401 && token) {
+      clearToken();
+      notifyAuthExpired();
+    }
+
     throw new ApiError(response.status, payload.message ?? "Nao foi possivel concluir a acao.", payload);
   }
 

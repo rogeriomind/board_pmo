@@ -1,4 +1,5 @@
-import { useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { useQueryClient } from "@tanstack/react-query";
 import { Toaster } from "react-hot-toast";
 import { ActivityCreateModal } from "./components/ActivityCreateModal";
 import { ActivityDetailDrawer } from "./components/ActivityDetailDrawer";
@@ -10,13 +11,14 @@ import { Sidebar } from "./components/Sidebar";
 import { Topbar } from "./components/Topbar";
 import { useAlerts } from "./hooks/useAlerts";
 import { authService } from "./services/authService";
-import { getToken } from "./services/api";
+import { AUTH_EXPIRED_EVENT, getToken } from "./services/api";
 import type { Activity, ActivityFilters, ActivityStatus, AuthUser } from "./types";
 import { LoginPage } from "./pages/LoginPage";
 
 type View = "board" | "alerts";
 
 export default function App() {
+  const queryClient = useQueryClient();
   const [user, setUser] = useState<AuthUser | null>(() => authService.getStoredUser());
   const [activeView, setActiveView] = useState<View>("board");
   const [filters, setFilters] = useState<ActivityFilters>({});
@@ -27,6 +29,22 @@ export default function App() {
   const authenticated = Boolean(user && getToken());
   const alerts = useAlerts(authenticated);
 
+  const resetSession = useCallback(() => {
+    authService.logout();
+    queryClient.clear();
+    setUser(null);
+    setActiveView("board");
+    setSelectedActivityId(null);
+  }, [queryClient]);
+
+  useEffect(() => {
+    window.addEventListener(AUTH_EXPIRED_EVENT, resetSession);
+
+    return () => {
+      window.removeEventListener(AUTH_EXPIRED_EVENT, resetSession);
+    };
+  }, [resetSession]);
+
   const alertCount = useMemo(() => {
     if (!alerts.data) return 0;
     const ids = new Set<string>();
@@ -35,10 +53,7 @@ export default function App() {
   }, [alerts.data]);
 
   function logout() {
-    authService.logout();
-    setUser(null);
-    setActiveView("board");
-    setSelectedActivityId(null);
+    resetSession();
   }
 
   if (!authenticated || !user) {
