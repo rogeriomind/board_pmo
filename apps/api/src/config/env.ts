@@ -13,7 +13,15 @@ const envSchema = z.object({
   JWT_SECRET: z.string().min(16).default("development-secret-change-me"),
   PORT: z.coerce.number().default(3333),
   CORS_ORIGIN: z.string().default("http://localhost:5173"),
-  DATA_DRIVER: z.enum(["json", "prisma"]).default("json")
+  DATA_DRIVER: z.enum(["json", "prisma"]).default("json"),
+  BOARD_MCP_DEFAULT_USER_ID: z.preprocess(
+    (value) => (typeof value === "string" && value.trim() === "" ? undefined : value),
+    z.string().uuid().optional()
+  ),
+  BOARD_MCP_DEFAULT_USER_EMAIL: z.preprocess(
+    (value) => (typeof value === "string" && value.trim() === "" ? undefined : value),
+    z.string().email().optional()
+  )
 });
 
 export const env = envSchema.parse(process.env);

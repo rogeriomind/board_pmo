@@ -30,6 +30,8 @@ services:
       CORS_ORIGIN: ${CORS_ORIGIN:-http://localhost}
       DATA_DRIVER: ${DATA_DRIVER:-prisma}
       SEED_DEFAULT_PASSWORD: ${SEED_DEFAULT_PASSWORD:-123456}
+      BOARD_MCP_DEFAULT_USER_ID: ${BOARD_MCP_DEFAULT_USER_ID:-}
+      BOARD_MCP_DEFAULT_USER_EMAIL: ${BOARD_MCP_DEFAULT_USER_EMAIL:-}
     depends_on:
       postgres:
         condition: service_healthy

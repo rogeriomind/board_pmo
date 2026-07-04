@@ -167,6 +167,55 @@ Usuarios do seed: Rogerio, Ana, Matheus e Gabrielle.
 
 Se `DATA_DRIVER="json"` estiver ativo, o login funciona sem Docker/PostgreSQL. Se `DATA_DRIVER="prisma"` estiver ativo, rode `db:push` e `db:seed` antes de entrar.
 
+## MCP
+
+O backend tambem expoe um servidor MCP via `stdio` para operar o board com as mesmas regras da API.
+
+Ferramentas disponiveis:
+
+```text
+board_search_tasks
+board_get_task
+board_create_task
+board_update_task
+board_move_task
+board_add_comment
+board_get_project_status
+board_list_blockers
+board_list_my_tasks
+```
+
+As ferramentas que escrevem no board registram historico em nome de um usuario. A chamada pode enviar `actorUserId` ou `actorEmail`; se nao enviar, o servidor usa `BOARD_MCP_DEFAULT_USER_ID`, depois `BOARD_MCP_DEFAULT_USER_EMAIL`, e por fim o primeiro usuario cadastrado.
+
+Para desenvolvimento local, gere o build e aponte o cliente MCP diretamente para o arquivo compilado:
+
+```bash
+npm run build -w @pmo-board/api
+node apps/api/dist/mcp/server.js
+```
+
+Em clientes MCP, evite `npm run` sem `--silent`, porque qualquer texto extra em `stdout` quebra o protocolo. Na VPS com Docker Compose, use o processo dentro do container da API:
+
+```json
+{
+  "mcpServers": {
+    "pmo-board": {
+      "command": "docker",
+      "args": [
+        "compose",
+        "-f",
+        "/opt/board_pmo/docker-compose.yml",
+        "exec",
+        "-T",
+        "api",
+        "node",
+        "apps/api/dist/mcp/server.js"
+      ]
+    }
+  }
+}
+```
+
 ## Scripts principais
 
 ```bash
