@@ -1,9 +1,15 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { createMcpExpressApp } from "@modelcontextprotocol/sdk/server/express.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
+import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
 import { ActivityStatus, Priority } from "@prisma/client";
+import type { Request, Response } from "express";
+import { randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { z, ZodError } from "zod";
+import { env } from "../config/env.js";
 import {
   activityCreateSchema,
   activityQuerySchema,
@@ -455,9 +461,164 @@ export function createBoardMcpServer() {
   return server;
 }
 
+type CliOptions = {
+  transport: "stdio" | "streamable-http";
+  host: string;
+  port: number;
+  path: string;
+};
+
 async function main() {
+  const options = parseCliOptions(process.argv.slice(2));
+  if (options.transport === "streamable-http") {
+    await runStreamableHttp(options);
+    return;
+  }
+
+  await runStdio();
+}
+
+async function runStdio() {
   const server = createBoardMcpServer();
   await server.connect(new StdioServerTransport());
+}
+
+async function runStreamableHttp(options: CliOptions) {
+  const app = createMcpExpressApp({ host: options.host });
+  const transports: Record<string, StreamableHTTPServerTransport> = {};
+
+  app.get("/health", (_req, res) => {
+    res.json({
+      status: "ok",
+      service: "pmo-board-mcp",
+      transport: "streamable-http",
+      sessions: Object.keys(transports).length
+    });
+  });
+
+  app.post(options.path, async (req, res) => {
+    await handleStreamableRequest(req, res, transports);
+  });
+
+  app.get(options.path, async (req, res) => {
+    const transport = findTransport(req, res, transports);
+    if (transport) {
+      await transport.handleRequest(req, res);
+    }
+  });
+
+  app.delete(options.path, async (req, res) => {
+    const transport = findTransport(req, res, transports);
+    if (transport) {
+      await transport.handleRequest(req, res);
+    }
+  });
+
+  app.listen(options.port, options.host, () => {
+    console.log(`PMO Board MCP listening on http://${options.host}:${options.port}${options.path}`);
+  });
+}
+
+async function handleStreamableRequest(
+  req: Request,
+  res: Response,
+  transports: Record<string, StreamableHTTPServerTransport>
+) {
+  const sessionId = headerValue(req.headers["mcp-session-id"]);
+  try {
+    let transport = sessionId ? transports[sessionId] : undefined;
+    if (!transport && !sessionId && isInitializeRequest(req.body)) {
+      transport = new StreamableHTTPServerTransport({
+        sessionIdGenerator: () => randomUUID(),
+        onsessioninitialized: (newSessionId) => {
+          if (transport) {
+            transports[newSessionId] = transport;
+          }
+        },
+        onsessionclosed: (closedSessionId) => {
+          delete transports[closedSessionId];
+        }
+      });
+      transport.onclose = () => {
+        const closedSessionId = transport?.sessionId;
+        if (closedSessionId) {
+          delete transports[closedSessionId];
+        }
+      };
+
+      const server = createBoardMcpServer();
+      await server.connect(transport);
+    }
+
+    if (!transport) {
+      res.status(400).json({
+        jsonrpc: "2.0",
+        error: {
+          code: -32000,
+          message: "Bad Request: No valid MCP session ID provided."
+        },
+        id: null
+      });
+      return;
+    }
+
+    await transport.handleRequest(req, res, req.body);
+  } catch (error) {
+    console.error("Error handling MCP request:", error);
+    if (!res.headersSent) {
+      res.status(500).json({
+        jsonrpc: "2.0",
+        error: { code: -32603, message: "Internal server error" },
+        id: null
+      });
+    }
+  }
+}
+
+function findTransport(
+  req: Request,
+  res: Response,
+  transports: Record<string, StreamableHTTPServerTransport>
+) {
+  const sessionId = headerValue(req.headers["mcp-session-id"]);
+  const transport = sessionId ? transports[sessionId] : undefined;
+  if (!transport) {
+    res.status(400).send("Invalid or missing MCP session ID");
+    return null;
+  }
+  return transport;
+}
+
+function parseCliOptions(args: string[]): CliOptions {
+  const transport = readArg(args, "--transport", "stdio");
+  if (transport !== "stdio" && transport !== "streamable-http") {
+    throw new Error(`Unsupported MCP transport: ${transport}`);
+  }
+
+  return {
+    transport,
+    host: readArg(args, "--host", process.env.MCP_HOST ?? env.MCP_HOST),
+    port: Number(readArg(args, "--port", process.env.MCP_PORT ?? String(env.MCP_PORT))),
+    path: normalizePath(readArg(args, "--path", process.env.MCP_PATH ?? env.MCP_PATH))
+  };
+}
+
+function readArg(args: string[], name: string, fallback: string) {
+  const index = args.indexOf(name);
+  if (index >= 0 && args[index + 1]) {
+    return args[index + 1];
+  }
+  const withEquals = args.find((arg) => arg.startsWith(`${name}=`));
+  return withEquals ? withEquals.slice(name.length + 1) : fallback;
+}
+
+function normalizePath(path: string) {
+  const trimmed = path.trim() || "/mcp";
+  return trimmed.startsWith("/") ? trimmed : `/${trimmed}`;
+}
+
+function headerValue(value: string | string[] | undefined) {
+  return Array.isArray(value) ? value[0] : value;
 }
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {

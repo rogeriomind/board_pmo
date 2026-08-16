@@ -38,6 +38,34 @@ services:
     expose:
       - "3333"
 
+  mcp-board:
+    build:
+      context: .
+      dockerfile: apps/api/Dockerfile
+    container_name: pmo-board-mcp
+    restart: unless-stopped
+    command:
+      [
+        "sh",
+        "-c",
+        "npx prisma db push --schema apps/api/prisma/schema.prisma && npm run prisma:seed -w @pmo-board/api && npm run mcp -w @pmo-board/api -- --transport streamable-http --host 0.0.0.0 --port 8011 --path /mcp"
+      ]
+    environment:
+      DATABASE_URL: ${DATABASE_URL:-postgresql://pmo:pmo@postgres:5432/pmo_board?schema=public}
+      JWT_SECRET: ${JWT_SECRET:-development-secret-change-me}
+      DATA_DRIVER: ${DATA_DRIVER:-prisma}
+      SEED_DEFAULT_PASSWORD: ${SEED_DEFAULT_PASSWORD:-123456}
+      BOARD_MCP_DEFAULT_USER_ID: ${BOARD_MCP_DEFAULT_USER_ID:-}
+      BOARD_MCP_DEFAULT_USER_EMAIL: ${BOARD_MCP_DEFAULT_USER_EMAIL:-}
+      MCP_HOST: 0.0.0.0
+      MCP_PORT: 8011
+      MCP_PATH: /mcp
+    depends_on:
+      postgres:
+        condition: service_healthy
+    expose:
+      - "8011"
+
   web:
     build:
       context: .

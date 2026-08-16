@@ -8,9 +8,29 @@ Arquivo compartilhado para outros projetos conectarem no MCP do PMO Board.
 /opt/shared/mcp/board_pmo.md
 ```
 
-## Servidor MCP
+## Servidor MCP em producao
 
-O MCP roda via `stdio` dentro do container `api` do Board. O projeto precisa estar publicado em:
+O MCP roda como servico privado `mcp-board` na rede Compose do Board, sem porta publica:
+
+```text
+http://mcp-board:8011/mcp
+```
+
+Health check interno:
+
+```bash
+docker compose -f /opt/board_pmo/docker-compose.yml exec mcp-board wget -qO- http://127.0.0.1:8011/health
+```
+
+Deploy isolado:
+
+```bash
+docker compose -f /opt/board_pmo/docker-compose.yml up -d --build mcp-board
+```
+
+## Rollback via stdio
+
+O MCP tambem continua disponivel via `stdio` dentro do container `api` do Board. O projeto precisa estar publicado em:
 
 ```text
 /opt/board_pmo
