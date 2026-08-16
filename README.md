@@ -175,6 +175,7 @@ Ferramentas disponiveis:
 
 ```text
 board_search_tasks
+board_search_users
 board_get_task
 board_create_task
 board_update_task

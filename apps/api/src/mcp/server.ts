@@ -17,7 +17,7 @@ import {
   moveActivitySchema
 } from "../schemas/activity.schema.js";
 import { activityRepository } from "../services/activity.repository.js";
-import { findBoardUser, resolveBoardActor } from "../services/boardUser.service.js";
+import { findBoardUser, resolveBoardActor, searchBoardUsers } from "../services/boardUser.service.js";
 import { HttpError } from "../utils/httpError.js";
 
 type BoardTask = {
@@ -54,6 +54,11 @@ const searchTasksInputSchema = activityQuerySchema.extend({
 
 const getTaskInputSchema = z.object({
   id: z.string().uuid()
+});
+
+const searchUsersInputSchema = z.object({
+  query: z.string().trim().optional().nullable(),
+  limit: z.number().int().min(1).max(100).default(20)
 });
 
 const createTaskInputSchema = activityCreateSchema.extend(actorFields);
@@ -226,6 +231,26 @@ async function resolveAssignee(input: { assigneeId?: string | null; assigneeEmai
 }
 
 function registerTools(server: McpServer) {
+  server.registerTool(
+    "board_search_users",
+    {
+      title: "Buscar usuarios do board",
+      description: "Busca usuarios do Board por nome ou e-mail para resolver responsaveis.",
+      inputSchema: searchUsersInputSchema,
+      annotations: { readOnlyHint: true, openWorldHint: false }
+    },
+    async (input) =>
+      runTool(async () => {
+        const parsed = searchUsersInputSchema.parse(input);
+        const users = await searchBoardUsers(parsed);
+
+        return {
+          count: users.length,
+          users
+        };
+      })
+  );
+
   server.registerTool(
     "board_search_tasks",
     {

@@ -36,6 +36,38 @@ function publicLocalUser(user: Awaited<ReturnType<typeof findLocalUserByEmail>>)
   };
 }
 
+function plain(value: string) {
+  return value
+    .normalize("NFD")
+    .replace(/\p{Diacritic}/gu, "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .toLocaleLowerCase("pt-BR");
+}
+
+function matchesUser(user: BoardUser, query: string) {
+  const target = plain(query);
+  if (!target) return true;
+  return plain(user.name).includes(target) || plain(user.email).includes(target);
+}
+
+export async function listBoardUsers() {
+  if (env.DATA_DRIVER === "json") {
+    return localUsers(await listLocalUsers()).sort((a, b) => a.name.localeCompare(b.name, "pt-BR"));
+  }
+
+  return prisma.user.findMany({
+    select: userSelect,
+    orderBy: { name: "asc" }
+  });
+}
+
+export async function searchBoardUsers(input: { query?: string | null; limit?: number | null }) {
+  const limit = Math.max(1, Math.min(input.limit ?? 20, 100));
+  const users = await listBoardUsers();
+  return users.filter((user) => matchesUser(user, input.query ?? "")).slice(0, limit);
+}
+
 export async function findBoardUser(input: { userId?: string | null; email?: string | null }) {
   const userId = clean(input.userId);
   const email = clean(input.email);
