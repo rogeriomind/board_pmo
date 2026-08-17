@@ -51,21 +51,23 @@ CREATE TABLE IF NOT EXISTS "idempotency_records" (
   CONSTRAINT "idempotency_records_pkey" PRIMARY KEY ("id")
 );
 
-INSERT INTO "tenants" ("id", "name", "slug", "active")
-VALUES ('00000000-0000-4000-8000-000000000001', 'Default Tenant', 'default-tenant', true)
+INSERT INTO "tenants" ("id", "name", "slug", "active", "created_at", "updated_at")
+VALUES ('00000000-0000-4000-8000-000000000001', 'Default Tenant', 'default-tenant', true, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
 ON CONFLICT ("id") DO UPDATE SET
   "name" = EXCLUDED."name",
   "slug" = EXCLUDED."slug",
   "active" = EXCLUDED."active",
   "updated_at" = CURRENT_TIMESTAMP;
 
-INSERT INTO "portfolios" ("id", "tenant_id", "name", "description", "active")
+INSERT INTO "portfolios" ("id", "tenant_id", "name", "description", "active", "created_at", "updated_at")
 VALUES (
   '00000000-0000-4000-8000-000000000002',
   '00000000-0000-4000-8000-000000000001',
   'Default Portfolio',
   'Portfolio default para compatibilidade com atividades existentes.',
-  true
+  true,
+  CURRENT_TIMESTAMP,
+  CURRENT_TIMESTAMP
 )
 ON CONFLICT ("id") DO UPDATE SET
   "tenant_id" = EXCLUDED."tenant_id",
@@ -74,7 +76,7 @@ ON CONFLICT ("id") DO UPDATE SET
   "active" = EXCLUDED."active",
   "updated_at" = CURRENT_TIMESTAMP;
 
-INSERT INTO "projects" ("id", "tenant_id", "portfolio_id", "name", "description", "status", "active")
+INSERT INTO "projects" ("id", "tenant_id", "portfolio_id", "name", "description", "status", "active", "created_at", "updated_at")
 VALUES (
   '00000000-0000-4000-8000-000000000003',
   '00000000-0000-4000-8000-000000000001',
@@ -82,7 +84,9 @@ VALUES (
   'Projeto Geral',
   'Projeto default para compatibilidade com atividades existentes.',
   'ACTIVE',
-  true
+  true,
+  CURRENT_TIMESTAMP,
+  CURRENT_TIMESTAMP
 )
 ON CONFLICT ("id") DO UPDATE SET
   "tenant_id" = EXCLUDED."tenant_id",
