@@ -52,3 +52,4 @@ jobs:
           "${SSH[@]}" "set -e; mkdir -p ~/.ssh; chmod 700 ~/.ssh; ssh-keyscan -H github.com >> ~/.ssh/known_hosts; mkdir -p '$DEPLOY_PATH'; if [ ! -d '$DEPLOY_PATH/.git' ]; then if [ -z \"\$(ls -A '$DEPLOY_PATH' 2>/dev/null)\" ]; then git clone '$REPO_URL' '$DEPLOY_PATH'; else echo '$DEPLOY_PATH exists and is not empty or a git repo'; exit 1; fi; fi"
           printf '%s' "$APP_ENV_B64" | "${SSH[@]}" "base64 -d > '$DEPLOY_PATH/.env'"
           "${SSH[@]}" "set -e; cd '$DEPLOY_PATH'; git remote set-url origin '$REPO_URL'; git fetch origin main; git checkout main; git pull --ff-only origin main; docker compose up -d --build; docker compose ps"
+          "${SSH[@]}" "set -e; cd '$DEPLOY_PATH'; for i in \$(seq 1 30); do if docker compose exec -T web wget -qO- http://api:3333/api/health; then exit 0; fi; sleep 2; done; docker compose ps; docker compose logs --tail=120 api mcp-board db-deploy; exit 1"

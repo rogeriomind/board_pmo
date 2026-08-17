@@ -23,6 +23,7 @@ services:
       dockerfile: apps/api/Dockerfile
     container_name: pmo-board-api
     restart: unless-stopped
+    command: ["npm", "run", "start", "-w", "@pmo-board/api"]
     environment:
       DATABASE_URL: ${DATABASE_URL:-postgresql://pmo:pmo@postgres:5432/pmo_board?schema=public}
       JWT_SECRET: ${JWT_SECRET:-development-secret-change-me}
@@ -35,8 +36,38 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      db-deploy:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:3333/api/health >/dev/null 2>&1 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
     expose:
       - "3333"
+
+  db-deploy:
+    build:
+      context: .
+      dockerfile: apps/api/Dockerfile
+    container_name: pmo-board-db-deploy
+    restart: "no"
+    command:
+      [
+        "sh",
+        "-c",
+        "npm run prisma:deploy -w @pmo-board/api && npm run prisma:seed -w @pmo-board/api"
+      ]
+    environment:
+      DATABASE_URL: ${DATABASE_URL:-postgresql://pmo:pmo@postgres:5432/pmo_board?schema=public}
+      JWT_SECRET: ${JWT_SECRET:-development-secret-change-me}
+      DATA_DRIVER: ${DATA_DRIVER:-prisma}
+      SEED_DEFAULT_PASSWORD: ${SEED_DEFAULT_PASSWORD:-123456}
+      BOARD_MCP_DEFAULT_USER_ID: ${BOARD_MCP_DEFAULT_USER_ID:-}
+      BOARD_MCP_DEFAULT_USER_EMAIL: ${BOARD_MCP_DEFAULT_USER_EMAIL:-}
+    depends_on:
+      postgres:
+        condition: service_healthy
 
   mcp-board:
     build:
@@ -48,7 +79,7 @@ services:
       [
         "sh",
         "-c",
-        "npm run prisma:deploy -w @pmo-board/api && npm run prisma:seed -w @pmo-board/api && npm run mcp -w @pmo-board/api -- --transport streamable-http --host 0.0.0.0 --port 8011 --path /mcp"
+        "npm run mcp -w @pmo-board/api -- --transport streamable-http --host 0.0.0.0 --port 8011 --path /mcp"
       ]
     environment:
       DATABASE_URL: ${DATABASE_URL:-postgresql://pmo:pmo@postgres:5432/pmo_board?schema=public}
@@ -63,6 +94,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      db-deploy:
+        condition: service_completed_successfully
     expose:
       - "8011"
 
@@ -77,7 +110,8 @@ services:
     ports:
       - "${WEB_HOST:-0.0.0.0}:${WEB_PORT:-80}:80"
     depends_on:
-      - api
+      api:
+        condition: service_healthy
 
 volumes:
   pmo_board_pgdata:
