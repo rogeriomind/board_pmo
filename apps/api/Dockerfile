@@ -24,4 +24,4 @@ COPY --from=build /app/apps/api/prisma ./apps/api/prisma
 
 EXPOSE 3333
 
-CMD ["sh", "-c", "npx prisma migrate deploy --schema apps/api/prisma/schema.prisma && npm run prisma:seed -w @pmo-board/api && npm run start -w @pmo-board/api"]
+CMD ["sh", "-c", "npm run prisma:deploy -w @pmo-board/api && npm run prisma:seed -w @pmo-board/api && npm run start -w @pmo-board/api"]

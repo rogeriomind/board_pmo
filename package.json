@@ -12,7 +12,7 @@
     "test": "npm run test -w @pmo-board/api",
     "typecheck": "npm run typecheck -w @pmo-board/api && npm run typecheck -w @pmo-board/web",
     "db:generate": "dotenv -e .env -- npm run prisma:generate -w @pmo-board/api",
-    "db:migrate": "dotenv -e .env -- npm run prisma:migrate:deploy -w @pmo-board/api",
+    "db:migrate": "dotenv -e .env -- npm run prisma:deploy:dev -w @pmo-board/api",
     "db:push": "dotenv -e .env -- npm run prisma:push -w @pmo-board/api",
     "db:seed": "dotenv -e .env -- npm run prisma:seed -w @pmo-board/api",
     "db:studio": "dotenv -e .env -- npm run prisma:studio -w @pmo-board/api"

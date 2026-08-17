@@ -11,6 +11,8 @@
     "mcp": "node dist/mcp/server.js",
     "mcp:dev": "tsx src/mcp/server.ts",
     "typecheck": "tsc --noEmit -p tsconfig.json",
+    "prisma:deploy": "node dist/scripts/deployDatabase.js",
+    "prisma:deploy:dev": "tsx src/scripts/deployDatabase.ts",
     "prisma:generate": "prisma generate",
     "prisma:migrate:deploy": "prisma migrate deploy",
     "prisma:push": "prisma db push",
