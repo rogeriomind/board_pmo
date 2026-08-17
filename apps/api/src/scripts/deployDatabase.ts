@@ -60,8 +60,10 @@ async function createIndexIfTableExists(tableName: string, statement: string) {
 }
 
 async function applyLegacyDomainPatch() {
+  console.log("Applying PMO legacy database patch...");
   await execute(`CREATE EXTENSION IF NOT EXISTS "pgcrypto"`);
 
+  console.log("Ensuring PMO domain tables...");
   await execute(`
     CREATE TABLE IF NOT EXISTS "tenants" (
       "id" UUID NOT NULL DEFAULT gen_random_uuid(),
@@ -120,6 +122,7 @@ async function applyLegacyDomainPatch() {
     )
   `);
 
+  console.log("Ensuring default tenant, portfolio and project...");
   await execute(`
     INSERT INTO "tenants" ("id", "name", "slug", "active")
     VALUES ('00000000-0000-4000-8000-000000000001', 'Default Tenant', 'default-tenant', true)
@@ -169,6 +172,7 @@ async function applyLegacyDomainPatch() {
   `);
 
   if (await tableExists("activities")) {
+    console.log("Backfilling existing activities with default PMO scope...");
     if (!(await columnExists("activities", "tenant_id"))) {
       await execute(`ALTER TABLE "activities" ADD COLUMN "tenant_id" UUID`);
     }
@@ -188,6 +192,7 @@ async function applyLegacyDomainPatch() {
     await execute(`ALTER TABLE "activities" ALTER COLUMN "project_id" SET NOT NULL`);
   }
 
+  console.log("Ensuring PMO foreign keys and indexes...");
   await addConstraintIfMissing(
     "portfolios_tenant_id_fkey",
     ["portfolios", "tenants"],
@@ -235,6 +240,7 @@ async function applyLegacyDomainPatch() {
   await createIndexIfTableExists("activities", `CREATE INDEX IF NOT EXISTS "activities_tenant_id_updated_at_idx" ON "activities"("tenant_id", "updated_at")`);
   await createIndexIfTableExists("idempotency_records", `CREATE UNIQUE INDEX IF NOT EXISTS "idempotency_records_tenant_id_key_key" ON "idempotency_records"("tenant_id", "key")`);
   await createIndexIfTableExists("idempotency_records", `CREATE INDEX IF NOT EXISTS "idempotency_records_tenant_id_operation_idx" ON "idempotency_records"("tenant_id", "operation")`);
+  console.log("PMO legacy database patch completed.");
 }
 
 function runPrismaDbPush() {
@@ -256,7 +262,9 @@ function runPrismaDbPush() {
 async function main() {
   await applyLegacyDomainPatch();
   await prisma.$disconnect();
+  console.log("Synchronizing Prisma schema...");
   runPrismaDbPush();
+  console.log("Database deploy completed.");
 }
 
 main().catch(async (error) => {
