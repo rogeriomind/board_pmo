@@ -1,5 +1,14 @@
 import { ActivityStatus, PrismaClient, Priority } from "@prisma/client";
 import bcrypt from "bcryptjs";
+import {
+  DEFAULT_PORTFOLIO_ID,
+  DEFAULT_PORTFOLIO_NAME,
+  DEFAULT_PROJECT_ID,
+  DEFAULT_PROJECT_NAME,
+  DEFAULT_TENANT_ID,
+  DEFAULT_TENANT_NAME,
+  DEFAULT_TENANT_SLUG
+} from "../src/domain/pmoContext.js";
 
 const prisma = new PrismaClient();
 
@@ -13,7 +22,65 @@ const tagColors: Record<string, string> = {
   Seguranca: "#14b8a6"
 };
 
+async function ensureDefaultDomain() {
+  const tenant = await prisma.tenant.upsert({
+    where: { id: DEFAULT_TENANT_ID },
+    update: {
+      name: DEFAULT_TENANT_NAME,
+      slug: DEFAULT_TENANT_SLUG,
+      active: true
+    },
+    create: {
+      id: DEFAULT_TENANT_ID,
+      name: DEFAULT_TENANT_NAME,
+      slug: DEFAULT_TENANT_SLUG,
+      active: true
+    }
+  });
+
+  const portfolio = await prisma.portfolio.upsert({
+    where: { id: DEFAULT_PORTFOLIO_ID },
+    update: {
+      tenantId: tenant.id,
+      name: DEFAULT_PORTFOLIO_NAME,
+      description: "Portfolio default para compatibilidade com atividades existentes.",
+      active: true
+    },
+    create: {
+      id: DEFAULT_PORTFOLIO_ID,
+      tenantId: tenant.id,
+      name: DEFAULT_PORTFOLIO_NAME,
+      description: "Portfolio default para compatibilidade com atividades existentes.",
+      active: true
+    }
+  });
+
+  const project = await prisma.project.upsert({
+    where: { id: DEFAULT_PROJECT_ID },
+    update: {
+      tenantId: tenant.id,
+      portfolioId: portfolio.id,
+      name: DEFAULT_PROJECT_NAME,
+      description: "Projeto default para compatibilidade com atividades existentes.",
+      status: "ACTIVE",
+      active: true
+    },
+    create: {
+      id: DEFAULT_PROJECT_ID,
+      tenantId: tenant.id,
+      portfolioId: portfolio.id,
+      name: DEFAULT_PROJECT_NAME,
+      description: "Projeto default para compatibilidade com atividades existentes.",
+      status: "ACTIVE",
+      active: true
+    }
+  });
+
+  return { tenant, portfolio, project };
+}
+
 async function main() {
+  const defaultDomain = await ensureDefaultDomain();
   const existingUsers = await prisma.user.count();
 
   if (existingUsers > 0) {
@@ -38,6 +105,11 @@ async function main() {
   );
 
   const [rogerio, ana, matheus, gabrielle] = users;
+
+  await prisma.project.update({
+    where: { id: defaultDomain.project.id },
+    data: { ownerId: rogerio.id }
+  });
 
   await Promise.all(
     Object.entries(tagColors).map(([name, color]) =>
@@ -68,6 +140,8 @@ async function main() {
     const tags = await getTags(input.tags);
     const activity = await prisma.activity.create({
       data: {
+        tenantId: defaultDomain.tenant.id,
+        projectId: defaultDomain.project.id,
         title: input.title,
         description: input.description,
         status: input.status,

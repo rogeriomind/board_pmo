@@ -16,6 +16,12 @@ import {
   commentCreateSchema,
   moveActivitySchema
 } from "../schemas/activity.schema.js";
+import {
+  activeTask as isActiveTask,
+  buildProjectStatusReport,
+  flattenGroupedTasks as flattenActivityGroups,
+  taskSummary as summarizeTask
+} from "../services/activityStatus.service.js";
 import { activityRepository } from "../services/activity.repository.js";
 import { findBoardUser, resolveBoardActor, searchBoardUsers } from "../services/boardUser.service.js";
 import { HttpError } from "../utils/httpError.js";
@@ -42,17 +48,28 @@ const actorFields = {
   actorEmail: z.string().email().optional().nullable().describe("E-mail do usuario que executa a acao.")
 };
 
+const projectScopeFields = {
+  tenantId: z.string().uuid().describe("ID do tenant onde o projeto existe."),
+  projectId: z.string().uuid().describe("ID do projeto que delimita a operacao.")
+};
+
+const idempotencyField = {
+  idempotencyKey: z.string().trim().min(1).describe("Chave idempotente unica por tenant para retry seguro.")
+};
+
 const optionalDate = z
   .string()
   .regex(/^\d{4}-\d{2}-\d{2}$/, "Use o formato YYYY-MM-DD.")
   .optional()
   .nullable();
 
-const searchTasksInputSchema = activityQuerySchema.extend({
+export const searchTasksInputSchema = activityQuerySchema.extend({
+  ...projectScopeFields,
   limit: z.number().int().min(1).max(200).default(50)
 });
 
-const getTaskInputSchema = z.object({
+export const getTaskInputSchema = z.object({
+  ...projectScopeFields,
   id: z.string().uuid()
 });
 
@@ -61,9 +78,13 @@ const searchUsersInputSchema = z.object({
   limit: z.number().int().min(1).max(100).default(20)
 });
 
-const createTaskInputSchema = activityCreateSchema.extend(actorFields);
+export const createTaskInputSchema = activityCreateSchema.extend({
+  ...projectScopeFields,
+  ...actorFields,
+  ...idempotencyField
+});
 
-const updateTaskInputSchema = z
+export const updateTaskInputSchema = z
   .object({
     id: z.string().uuid(),
     title: z.string().trim().min(3).optional(),
@@ -73,7 +94,9 @@ const updateTaskInputSchema = z
     dueDate: optionalDate,
     tags: z.array(z.string().trim().min(1)).optional(),
     checklist: z.array(z.string().trim().min(1)).optional(),
-    ...actorFields
+    ...projectScopeFields,
+    ...actorFields,
+    ...idempotencyField
   })
   .refine(
     (value) =>
@@ -83,29 +106,36 @@ const updateTaskInputSchema = z
     { message: "Informe ao menos um campo para atualizar." }
   );
 
-const moveTaskInputSchema = z
+export const moveTaskInputSchema = z
   .object({
     id: z.string().uuid(),
-    ...actorFields
+    ...projectScopeFields,
+    ...actorFields,
+    ...idempotencyField
   })
   .merge(moveActivitySchema);
 
-const addCommentInputSchema = z.object({
+export const addCommentInputSchema = z.object({
+  ...projectScopeFields,
   id: z.string().uuid(),
   message: commentCreateSchema.shape.message,
-  ...actorFields
+  ...actorFields,
+  ...idempotencyField
 });
 
-const projectStatusInputSchema = z.object({
+export const projectStatusInputSchema = z.object({
+  ...projectScopeFields,
   dueSoonDays: z.number().int().min(1).max(90).default(7)
 });
 
-const listBlockersInputSchema = z.object({
+export const listBlockersInputSchema = z.object({
+  ...projectScopeFields,
   assigneeId: z.string().uuid().optional().nullable(),
   assigneeEmail: z.string().email().optional().nullable()
 });
 
-const listMyTasksInputSchema = z.object({
+export const listMyTasksInputSchema = z.object({
+  ...projectScopeFields,
   assigneeId: z.string().uuid().optional().nullable(),
   assigneeEmail: z.string().email().optional().nullable(),
   includeCompleted: z.boolean().default(false),
@@ -263,7 +293,7 @@ function registerTools(server: McpServer) {
       runTool(async () => {
         const { limit, ...filters } = searchTasksInputSchema.parse(input);
         const grouped = await activityRepository.listActivities(filters);
-        const tasks = flattenGroupedTasks(grouped);
+        const tasks = flattenActivityGroups(grouped);
 
         return {
           count: tasks.length,
@@ -284,8 +314,8 @@ function registerTools(server: McpServer) {
     },
     async (input) =>
       runTool(async () => {
-        const { id } = getTaskInputSchema.parse(input);
-        const task = await activityRepository.getActivityById(id);
+        const { id, tenantId, projectId } = getTaskInputSchema.parse(input);
+        const task = await activityRepository.getActivityById(id, { tenantId, projectId });
         return { task };
       })
   );
@@ -296,14 +326,17 @@ function registerTools(server: McpServer) {
       title: "Criar tarefa",
       description: "Cria uma tarefa no board e registra historico em nome do usuario ator.",
       inputSchema: createTaskInputSchema,
-      annotations: { destructiveHint: false, idempotentHint: false, openWorldHint: false }
+      annotations: { destructiveHint: false, idempotentHint: true, openWorldHint: false }
     },
     async (input) =>
       runTool(async () => {
         const parsed = createTaskInputSchema.parse(input);
-        const { actorUserId, actorEmail, ...data } = parsed;
+        const { actorUserId, actorEmail, tenantId, projectId, idempotencyKey, ...data } = parsed;
         const actor = await resolveBoardActor({ actorUserId, actorEmail });
-        const task = await activityRepository.createActivity(actor.id, data);
+        const task = await activityRepository.createActivity(actor.id, { ...data, tenantId, projectId }, {
+          scope: { tenantId, projectId },
+          idempotency: { tenantId, key: idempotencyKey, operation: "board_create_task" }
+        });
 
         return { actor, task };
       })
@@ -315,14 +348,17 @@ function registerTools(server: McpServer) {
       title: "Atualizar tarefa",
       description: "Atualiza campos editaveis de uma tarefa e registra historico.",
       inputSchema: updateTaskInputSchema,
-      annotations: { destructiveHint: false, idempotentHint: false, openWorldHint: false }
+      annotations: { destructiveHint: false, idempotentHint: true, openWorldHint: false }
     },
     async (input) =>
       runTool(async () => {
         const parsed = updateTaskInputSchema.parse(input);
-        const { id, actorUserId, actorEmail, ...data } = parsed;
+        const { id, actorUserId, actorEmail, tenantId, projectId, idempotencyKey, ...data } = parsed;
         const actor = await resolveBoardActor({ actorUserId, actorEmail });
-        const task = await activityRepository.updateActivity(id, actor.id, data);
+        const task = await activityRepository.updateActivity(id, actor.id, data, {
+          scope: { tenantId, projectId },
+          idempotency: { tenantId, key: idempotencyKey, operation: "board_update_task" }
+        });
 
         return { actor, task };
       })
@@ -334,14 +370,17 @@ function registerTools(server: McpServer) {
       title: "Mover tarefa",
       description: "Move uma tarefa para outro status, respeitando as regras do board.",
       inputSchema: moveTaskInputSchema,
-      annotations: { destructiveHint: false, idempotentHint: false, openWorldHint: false }
+      annotations: { destructiveHint: false, idempotentHint: true, openWorldHint: false }
     },
     async (input) =>
       runTool(async () => {
         const parsed = moveTaskInputSchema.parse(input);
-        const { id, status, reason, actorUserId, actorEmail } = parsed;
+        const { id, status, reason, actorUserId, actorEmail, tenantId, projectId, idempotencyKey } = parsed;
         const actor = await resolveBoardActor({ actorUserId, actorEmail });
-        const task = await activityRepository.moveActivity(id, actor.id, status, reason);
+        const task = await activityRepository.moveActivity(id, actor.id, status, reason, {
+          scope: { tenantId, projectId },
+          idempotency: { tenantId, key: idempotencyKey, operation: "board_move_task" }
+        });
 
         return { actor, task };
       })
@@ -353,14 +392,17 @@ function registerTools(server: McpServer) {
       title: "Adicionar comentario",
       description: "Adiciona um comentario a uma tarefa e registra historico.",
       inputSchema: addCommentInputSchema,
-      annotations: { destructiveHint: false, idempotentHint: false, openWorldHint: false }
+      annotations: { destructiveHint: false, idempotentHint: true, openWorldHint: false }
     },
     async (input) =>
       runTool(async () => {
         const parsed = addCommentInputSchema.parse(input);
-        const { id, message, actorUserId, actorEmail } = parsed;
+        const { id, message, actorUserId, actorEmail, tenantId, projectId, idempotencyKey } = parsed;
         const actor = await resolveBoardActor({ actorUserId, actorEmail });
-        const comment = await activityRepository.addComment(id, actor.id, message);
+        const comment = await activityRepository.addComment(id, actor.id, message, {
+          scope: { tenantId, projectId },
+          idempotency: { tenantId, key: idempotencyKey, operation: "board_add_comment" }
+        });
 
         return { actor, comment };
       })
@@ -376,50 +418,15 @@ function registerTools(server: McpServer) {
     },
     async (input) =>
       runTool(async () => {
-        const { dueSoonDays } = projectStatusInputSchema.parse(input);
-        const grouped = await activityRepository.listActivities({});
-        const tasks = flattenGroupedTasks(grouped);
-        const activeTasks = tasks.filter(activeTask);
-        const today = new Date();
-        today.setHours(0, 0, 0, 0);
-        const dueSoonLimit = new Date(today);
-        dueSoonLimit.setDate(today.getDate() + dueSoonDays);
-        dueSoonLimit.setHours(23, 59, 59, 999);
+        const { tenantId, projectId, dueSoonDays } = projectStatusInputSchema.parse(input);
+        const grouped = await activityRepository.listActivities({ tenantId, projectId });
 
-        const overdue = activeTasks.filter((task) => {
-          const dueDate = parseTaskDate(task.dueDate);
-          return dueDate ? dueDate < today : false;
+        return buildProjectStatusReport({
+          tenantId,
+          projectId,
+          grouped,
+          dueSoonDays
         });
-        const dueSoon = activeTasks.filter((task) => {
-          const dueDate = parseTaskDate(task.dueDate);
-          return dueDate ? dueDate >= today && dueDate <= dueSoonLimit : false;
-        });
-        const blockers = tasks.filter((task) => task.status === ActivityStatus.BLOCKED);
-        const completedCount = tasks.filter((task) => task.status === ActivityStatus.DONE).length;
-
-        return {
-          generatedAt: new Date().toISOString(),
-          totalTasks: tasks.length,
-          activeTasks: activeTasks.length,
-          completedTasks: completedCount,
-          canceledTasks: tasks.filter((task) => task.status === ActivityStatus.CANCELED).length,
-          completionRate: tasks.length === 0 ? 0 : Number(((completedCount / tasks.length) * 100).toFixed(2)),
-          countsByStatus: statusCounts(tasks),
-          countsByPriority: priorityCounts(tasks),
-          overdue: {
-            count: overdue.length,
-            tasks: overdue.map(taskSummary)
-          },
-          dueSoon: {
-            days: dueSoonDays,
-            count: dueSoon.length,
-            tasks: dueSoon.map(taskSummary)
-          },
-          blockers: {
-            count: blockers.length,
-            tasks: blockers.map(taskSummary)
-          }
-        };
       })
   );
 
@@ -436,15 +443,17 @@ function registerTools(server: McpServer) {
         const parsed = listBlockersInputSchema.parse(input);
         const assignee = await resolveAssignee(parsed);
         const grouped = await activityRepository.listActivities({
+          tenantId: parsed.tenantId,
+          projectId: parsed.projectId,
           status: ActivityStatus.BLOCKED,
           assigneeId: assignee?.id ?? undefined
         });
-        const blockers = flattenGroupedTasks(grouped);
+        const blockers = flattenActivityGroups(grouped);
 
         return {
           assignee,
           count: blockers.length,
-          blockers: blockers.map(taskSummary)
+          blockers: blockers.map(summarizeTask)
         };
       })
   );
@@ -463,14 +472,18 @@ function registerTools(server: McpServer) {
         const assignee =
           (await resolveAssignee({ assigneeId: parsed.assigneeId, assigneeEmail: parsed.assigneeEmail })) ??
           (await resolveBoardActor({ actorUserId: parsed.actorUserId, actorEmail: parsed.actorEmail }));
-        const grouped = await activityRepository.listActivities({ assigneeId: assignee.id });
-        const tasks = flattenGroupedTasks(grouped).filter((task) => parsed.includeCompleted || activeTask(task));
+        const grouped = await activityRepository.listActivities({
+          tenantId: parsed.tenantId,
+          projectId: parsed.projectId,
+          assigneeId: assignee.id
+        });
+        const tasks = flattenActivityGroups(grouped).filter((task) => parsed.includeCompleted || isActiveTask(task));
 
         return {
           assignee,
           includeCompleted: parsed.includeCompleted,
           count: tasks.length,
-          tasks: tasks.map(taskSummary)
+          tasks: tasks.map(summarizeTask)
         };
       })
   );

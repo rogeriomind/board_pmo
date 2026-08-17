@@ -63,6 +63,8 @@ export type HistoryItem = {
 
 export type Activity = {
   id: string;
+  tenantId?: string;
+  projectId?: string;
   title: string;
   description?: string | null;
   status: ActivityStatus;
@@ -87,6 +89,8 @@ export type Activity = {
 export type ActivityGroups = Record<ActivityStatus, Activity[]>;
 
 export type ActivityFilters = {
+  tenantId?: string;
+  projectId?: string;
   search?: string;
   assigneeId?: string;
   priority?: Priority | "";

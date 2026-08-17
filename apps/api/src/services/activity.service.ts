@@ -1,4 +1,5 @@
 import { ActivityStatus, Prisma, Priority } from "@prisma/client";
+import { withDefaultPmoScope, type PmoScope, type PmoScopeInput } from "../domain/pmoContext.js";
 import { prisma } from "../lib/prisma.js";
 import { HttpError } from "../utils/httpError.js";
 
@@ -42,8 +43,27 @@ const tagPalette = [
 ];
 
 type ActivityWithRelations = Prisma.ActivityGetPayload<{ include: typeof detailInclude }>;
+type ActivityCardWithRelations = Prisma.ActivityGetPayload<{ include: typeof cardInclude }>;
 
-export function serializeActivity(activity: ActivityWithRelations | Prisma.ActivityGetPayload<{ include: typeof cardInclude }>) {
+export type ActivityFilters = PmoScopeInput & {
+  status?: ActivityStatus;
+  assigneeId?: string;
+  priority?: Priority;
+  search?: string;
+  dueDateFrom?: string;
+  dueDateTo?: string;
+};
+
+export type ActivityWriteOptions = {
+  scope?: PmoScopeInput;
+  idempotency?: {
+    tenantId: string;
+    key: string;
+    operation: string;
+  };
+};
+
+export function serializeActivity(activity: ActivityWithRelations | ActivityCardWithRelations) {
   const { tags, checklistItems, ...rest } = activity;
 
   return {
@@ -64,6 +84,126 @@ function toDateInput(date?: Date | null) {
 
 function normalizeList(values?: string[]) {
   return [...new Set((values ?? []).map((value) => value.trim()).filter(Boolean))];
+}
+
+function scopeFor(input?: PmoScopeInput, fallback?: PmoScopeInput) {
+  return withDefaultPmoScope({
+    tenantId: input?.tenantId ?? fallback?.tenantId,
+    projectId: input?.projectId ?? fallback?.projectId
+  });
+}
+
+function scopedActivityWhere(id: string, scope: PmoScope): Prisma.ActivityWhereInput {
+  return {
+    id,
+    tenantId: scope.tenantId,
+    projectId: scope.projectId
+  };
+}
+
+function scopedActivityOnlyWhere(scope: PmoScope): Prisma.ActivityWhereInput {
+  return {
+    tenantId: scope.tenantId,
+    projectId: scope.projectId
+  };
+}
+
+function normalizeWriteOptions(options: ActivityWriteOptions | undefined, scope: PmoScope) {
+  if (options?.idempotency && options.idempotency.tenantId !== scope.tenantId) {
+    throw new HttpError(400, "tenantId da idempotencia diverge do tenantId da operacao.");
+  }
+
+  return {
+    scope,
+    idempotency: options?.idempotency
+  };
+}
+
+function asJsonPayload<T>(result: T) {
+  return JSON.parse(JSON.stringify(result)) as Prisma.InputJsonValue;
+}
+
+function isUniqueConstraint(error: unknown) {
+  return error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002";
+}
+
+async function runWrite<T>(
+  options: ReturnType<typeof normalizeWriteOptions>,
+  handler: (client: Prisma.TransactionClient) => Promise<{ result: T; resourceId?: string | null }>
+) {
+  const { idempotency } = options;
+
+  if (!idempotency) {
+    const value = await prisma.$transaction(handler);
+    return value.result;
+  }
+
+  try {
+    const value = await prisma.$transaction(async (client) => {
+      const existing = await client.idempotencyRecord.findUnique({
+        where: {
+          tenantId_key: {
+            tenantId: idempotency.tenantId,
+            key: idempotency.key
+          }
+        }
+      });
+
+      if (existing) {
+        return { result: existing.responsePayload as T, resourceId: existing.resourceId };
+      }
+
+      const next = await handler(client);
+
+      await client.idempotencyRecord.create({
+        data: {
+          tenantId: idempotency.tenantId,
+          key: idempotency.key,
+          operation: idempotency.operation,
+          resourceId: next.resourceId ?? null,
+          responsePayload: asJsonPayload(next.result)
+        }
+      });
+
+      return next;
+    });
+
+    return value.result;
+  } catch (error) {
+    if (isUniqueConstraint(error)) {
+      const existing = await prisma.idempotencyRecord.findUnique({
+        where: {
+          tenantId_key: {
+            tenantId: idempotency.tenantId,
+            key: idempotency.key
+          }
+        }
+      });
+
+      if (existing) {
+        return existing.responsePayload as T;
+      }
+    }
+
+    throw error;
+  }
+}
+
+async function ensureProject(client: Prisma.TransactionClient, scope: PmoScope) {
+  const project = await client.project.findFirst({
+    where: {
+      id: scope.projectId,
+      tenantId: scope.tenantId,
+      active: true
+    },
+    select: { id: true, tenantId: true }
+  });
+
+  if (!project) {
+    throw new HttpError(404, "Projeto nao encontrado para o tenant informado.");
+  }
+
+  return project;
 }
 
 async function findOrCreateTags(client: Prisma.TransactionClient, names: string[]) {
@@ -120,15 +260,24 @@ function readablePriority(priority: Priority) {
   return labels[priority];
 }
 
-export async function listActivities(filters: {
-  status?: ActivityStatus;
-  assigneeId?: string;
-  priority?: Priority;
-  search?: string;
-  dueDateFrom?: string;
-  dueDateTo?: string;
-}) {
+async function getSerializedActivity(client: Prisma.TransactionClient, id: string, scope: PmoScope) {
+  const activity = await client.activity.findFirst({
+    where: scopedActivityWhere(id, scope),
+    include: detailInclude
+  });
+
+  if (!activity) {
+    throw new HttpError(404, "Atividade nao encontrada.");
+  }
+
+  return serializeActivity(activity);
+}
+
+export async function listActivities(filters: ActivityFilters) {
+  const scope = withDefaultPmoScope(filters);
   const where: Prisma.ActivityWhereInput = {
+    tenantId: scope.tenantId,
+    projectId: scope.projectId,
     status: filters.status,
     assigneeId: filters.assigneeId,
     priority: filters.priority
@@ -173,9 +322,10 @@ export async function listActivities(filters: {
   return grouped;
 }
 
-export async function getActivityById(id: string) {
-  const activity = await prisma.activity.findUnique({
-    where: { id },
+export async function getActivityById(id: string, scopeInput?: PmoScopeInput) {
+  const scope = withDefaultPmoScope(scopeInput);
+  const activity = await prisma.activity.findFirst({
+    where: scopedActivityWhere(id, scope),
     include: detailInclude
   });
 
@@ -189,6 +339,8 @@ export async function getActivityById(id: string) {
 export async function createActivity(
   userId: string,
   data: {
+    tenantId?: string | null;
+    projectId?: string | null;
     title: string;
     description?: string | null;
     status: ActivityStatus;
@@ -197,13 +349,20 @@ export async function createActivity(
     dueDate?: string | null;
     tags?: string[];
     checklist?: string[];
-  }
+  },
+  options?: ActivityWriteOptions
 ) {
-  const created = await prisma.$transaction(async (client) => {
+  const scope = scopeFor(data, options?.scope);
+  const writeOptions = normalizeWriteOptions(options, scope);
+
+  return runWrite(writeOptions, async (client) => {
+    await ensureProject(client, scope);
     const tags = await findOrCreateTags(client, data.tags ?? []);
 
     const activity = await client.activity.create({
       data: {
+        tenantId: scope.tenantId,
+        projectId: scope.projectId,
         title: data.title,
         description: data.description || null,
         status: data.status,
@@ -228,10 +387,11 @@ export async function createActivity(
       }
     });
 
-    return activity;
+    return {
+      result: await getSerializedActivity(client, activity.id, scope),
+      resourceId: activity.id
+    };
   });
-
-  return getActivityById(created.id);
 }
 
 export async function updateActivity(
@@ -245,22 +405,26 @@ export async function updateActivity(
     dueDate?: string | null;
     tags?: string[];
     checklist?: string[];
-  }
+  },
+  options?: ActivityWriteOptions
 ) {
-  const current = await prisma.activity.findUnique({
-    where: { id },
-    include: {
-      assignee: { select: userSelect },
-      tags: { include: { tag: true } },
-      checklistItems: { orderBy: { createdAt: "asc" } }
+  const scope = scopeFor(options?.scope);
+  const writeOptions = normalizeWriteOptions(options, scope);
+
+  return runWrite(writeOptions, async (client) => {
+    const current = await client.activity.findFirst({
+      where: scopedActivityWhere(id, scope),
+      include: {
+        assignee: { select: userSelect },
+        tags: { include: { tag: true } },
+        checklistItems: { orderBy: { createdAt: "asc" } }
+      }
+    });
+
+    if (!current) {
+      throw new HttpError(404, "Atividade nao encontrada.");
     }
-  });
 
-  if (!current) {
-    throw new HttpError(404, "Atividade nao encontrada.");
-  }
-
-  await prisma.$transaction(async (client) => {
     const changes: Prisma.ActivityHistoryCreateManyInput[] = [];
     const updateData: Prisma.ActivityUpdateInput = {};
 
@@ -327,55 +491,67 @@ export async function updateActivity(
     if (changes.length > 0) {
       await client.activityHistory.createMany({ data: changes });
     }
-  });
 
-  return getActivityById(id);
+    return {
+      result: await getSerializedActivity(client, id, scope),
+      resourceId: id
+    };
+  });
 }
 
-export async function moveActivity(id: string, userId: string, status: ActivityStatus, reason?: string) {
-  const current = await prisma.activity.findUnique({
-    where: { id },
-    include: { checklistItems: true }
-  });
+export async function moveActivity(
+  id: string,
+  userId: string,
+  status: ActivityStatus,
+  reason?: string,
+  options?: ActivityWriteOptions
+) {
+  const scope = scopeFor(options?.scope);
+  const writeOptions = normalizeWriteOptions(options, scope);
 
-  if (!current) {
-    throw new HttpError(404, "Atividade nao encontrada.");
-  }
+  return runWrite(writeOptions, async (client) => {
+    const current = await client.activity.findFirst({
+      where: scopedActivityWhere(id, scope),
+      include: { checklistItems: true }
+    });
 
-  if (status === ActivityStatus.IN_PROGRESS && !current.assigneeId) {
-    throw new HttpError(422, "Defina um responsavel antes de mover para Em Andamento.");
-  }
-
-  if (status === ActivityStatus.IN_REVIEW && !current.description?.trim()) {
-    throw new HttpError(422, "Preencha a descricao antes de mover para Em Validacao.");
-  }
-
-  if (status === ActivityStatus.DONE) {
-    const checklistComplete =
-      current.checklistItems.length > 0 && current.checklistItems.every((item) => item.isDone);
-
-    if (!current.assigneeId) {
-      throw new HttpError(422, "Defina um responsavel antes de concluir a atividade.");
+    if (!current) {
+      throw new HttpError(404, "Atividade nao encontrada.");
     }
 
-    if (!current.description?.trim()) {
-      throw new HttpError(422, "Preencha a descricao antes de concluir a atividade.");
+    if (status === ActivityStatus.IN_PROGRESS && !current.assigneeId) {
+      throw new HttpError(422, "Defina um responsavel antes de mover para Em Andamento.");
     }
 
-    if (!checklistComplete) {
-      throw new HttpError(422, "Complete todos os itens do checklist antes de concluir.");
+    if (status === ActivityStatus.IN_REVIEW && !current.description?.trim()) {
+      throw new HttpError(422, "Preencha a descricao antes de mover para Em Validacao.");
     }
-  }
 
-  if (status === ActivityStatus.BLOCKED && !reason?.trim()) {
-    throw new HttpError(422, "Informe o motivo do bloqueio.");
-  }
+    if (status === ActivityStatus.DONE) {
+      const checklistComplete =
+        current.checklistItems.length > 0 && current.checklistItems.every((item) => item.isDone);
 
-  if (status === ActivityStatus.CANCELED && !reason?.trim()) {
-    throw new HttpError(422, "Informe o motivo do cancelamento.");
-  }
+      if (!current.assigneeId) {
+        throw new HttpError(422, "Defina um responsavel antes de concluir a atividade.");
+      }
 
-  await prisma.$transaction(async (client) => {
+      if (!current.description?.trim()) {
+        throw new HttpError(422, "Preencha a descricao antes de concluir a atividade.");
+      }
+
+      if (!checklistComplete) {
+        throw new HttpError(422, "Complete todos os itens do checklist antes de concluir.");
+      }
+    }
+
+    if (status === ActivityStatus.BLOCKED && !reason?.trim()) {
+      throw new HttpError(422, "Informe o motivo do bloqueio.");
+    }
+
+    if (status === ActivityStatus.CANCELED && !reason?.trim()) {
+      throw new HttpError(422, "Informe o motivo do cancelamento.");
+    }
+
     await client.activity.update({
       where: { id },
       data: {
@@ -399,35 +575,50 @@ export async function moveActivity(id: string, userId: string, status: ActivityS
         newValue: readableStatus(status)
       }
     });
-  });
 
-  return getActivityById(id);
+    return {
+      result: await getSerializedActivity(client, id, scope),
+      resourceId: id
+    };
+  });
 }
 
-export async function cancelActivity(id: string, userId: string, reason = "Cancelada pelo usuario") {
-  return moveActivity(id, userId, ActivityStatus.CANCELED, reason);
+export async function cancelActivity(id: string, userId: string, reason = "Cancelada pelo usuario", scope?: PmoScopeInput) {
+  return moveActivity(id, userId, ActivityStatus.CANCELED, reason, { scope });
 }
 
-export async function addChecklistItem(activityId: string, userId: string, title: string) {
-  const item = await prisma.checklistItem.create({
-    data: { activityId, title }
-  });
+export async function addChecklistItem(activityId: string, userId: string, title: string, scopeInput?: PmoScopeInput) {
+  const scope = withDefaultPmoScope(scopeInput);
 
-  await prisma.activityHistory.create({
-    data: {
-      activityId,
-      userId,
-      action: "Item adicionado ao checklist",
-      fieldChanged: "checklist",
-      newValue: title
+  return prisma.$transaction(async (client) => {
+    await getSerializedActivity(client, activityId, scope);
+
+    const item = await client.checklistItem.create({
+      data: { activityId, title }
+    });
+
+    await client.activityHistory.create({
+      data: {
+        activityId,
+        userId,
+        action: "Item adicionado ao checklist",
+        fieldChanged: "checklist",
+        newValue: title
+      }
+    });
+
+    return item;
+  });
+}
+
+export async function updateChecklistItem(itemId: string, userId: string, data: { title?: string; isDone?: boolean }, scopeInput?: PmoScopeInput) {
+  const scope = withDefaultPmoScope(scopeInput);
+  const current = await prisma.checklistItem.findFirst({
+    where: {
+      id: itemId,
+      activity: { is: scopedActivityOnlyWhere(scope) }
     }
   });
-
-  return item;
-}
-
-export async function updateChecklistItem(itemId: string, userId: string, data: { title?: string; isDone?: boolean }) {
-  const current = await prisma.checklistItem.findUnique({ where: { id: itemId } });
 
   if (!current) {
     throw new HttpError(404, "Item de checklist nao encontrado.");
@@ -452,8 +643,14 @@ export async function updateChecklistItem(itemId: string, userId: string, data: 
   return updated;
 }
 
-export async function deleteChecklistItem(itemId: string, userId: string) {
-  const current = await prisma.checklistItem.findUnique({ where: { id: itemId } });
+export async function deleteChecklistItem(itemId: string, userId: string, scopeInput?: PmoScopeInput) {
+  const scope = withDefaultPmoScope(scopeInput);
+  const current = await prisma.checklistItem.findFirst({
+    where: {
+      id: itemId,
+      activity: { is: scopedActivityOnlyWhere(scope) }
+    }
+  });
 
   if (!current) {
     throw new HttpError(404, "Item de checklist nao encontrado.");
@@ -471,40 +668,63 @@ export async function deleteChecklistItem(itemId: string, userId: string) {
   });
 }
 
-export async function addComment(activityId: string, userId: string, message: string) {
-  const comment = await prisma.comment.create({
-    data: { activityId, userId, message },
-    include: { user: { select: userSelect } }
-  });
+export async function addComment(
+  activityId: string,
+  userId: string,
+  message: string,
+  options?: ActivityWriteOptions
+) {
+  const scope = scopeFor(options?.scope);
+  const writeOptions = normalizeWriteOptions(options, scope);
 
-  await prisma.activityHistory.create({
-    data: {
-      activityId,
-      userId,
-      action: "Comentario adicionado"
-    }
-  });
+  return runWrite(writeOptions, async (client) => {
+    await getSerializedActivity(client, activityId, scope);
 
-  return comment;
+    const comment = await client.comment.create({
+      data: { activityId, userId, message },
+      include: { user: { select: userSelect } }
+    });
+
+    await client.activityHistory.create({
+      data: {
+        activityId,
+        userId,
+        action: "Comentario adicionado"
+      }
+    });
+
+    return { result: comment, resourceId: comment.id };
+  });
 }
 
-export async function listComments(activityId: string) {
+export async function listComments(activityId: string, scopeInput?: PmoScopeInput) {
+  const scope = withDefaultPmoScope(scopeInput);
+
   return prisma.comment.findMany({
-    where: { activityId },
+    where: {
+      activityId,
+      activity: { is: scopedActivityWhere(activityId, scope) }
+    },
     include: { user: { select: userSelect } },
     orderBy: { createdAt: "asc" }
   });
 }
 
-export async function listHistory(activityId: string) {
+export async function listHistory(activityId: string, scopeInput?: PmoScopeInput) {
+  const scope = withDefaultPmoScope(scopeInput);
+
   return prisma.activityHistory.findMany({
-    where: { activityId },
+    where: {
+      activityId,
+      activity: { is: scopedActivityWhere(activityId, scope) }
+    },
     include: { user: { select: userSelect } },
     orderBy: { createdAt: "desc" }
   });
 }
 
-export async function listAlerts() {
+export async function listAlerts(scopeInput?: PmoScopeInput) {
+  const scope = withDefaultPmoScope(scopeInput);
   const today = new Date();
   today.setHours(0, 0, 0, 0);
 
@@ -516,29 +736,34 @@ export async function listAlerts() {
   inFiveDays.setDate(today.getDate() + 5);
   inFiveDays.setHours(23, 59, 59, 999);
 
+  const baseWhere = {
+    tenantId: scope.tenantId,
+    projectId: scope.projectId
+  };
+
   const [overdue, atRisk, blocked, withoutAssignee, nearDueDate] = await Promise.all([
     prisma.activity.findMany({
-      where: { dueDate: { lt: today }, status: { not: ActivityStatus.DONE } },
+      where: { ...baseWhere, dueDate: { lt: today }, status: { not: ActivityStatus.DONE } },
       include: cardInclude,
       orderBy: { dueDate: "asc" }
     }),
     prisma.activity.findMany({
-      where: { dueDate: { gte: today, lte: inTwoDays }, status: { not: ActivityStatus.DONE } },
+      where: { ...baseWhere, dueDate: { gte: today, lte: inTwoDays }, status: { not: ActivityStatus.DONE } },
       include: cardInclude,
       orderBy: { dueDate: "asc" }
     }),
     prisma.activity.findMany({
-      where: { status: ActivityStatus.BLOCKED },
+      where: { ...baseWhere, status: ActivityStatus.BLOCKED },
       include: cardInclude,
       orderBy: { updatedAt: "desc" }
     }),
     prisma.activity.findMany({
-      where: { assigneeId: null, status: { not: ActivityStatus.DONE } },
+      where: { ...baseWhere, assigneeId: null, status: { not: ActivityStatus.DONE } },
       include: cardInclude,
       orderBy: { createdAt: "desc" }
     }),
     prisma.activity.findMany({
-      where: { dueDate: { gte: today, lte: inFiveDays }, status: { not: ActivityStatus.DONE } },
+      where: { ...baseWhere, dueDate: { gte: today, lte: inFiveDays }, status: { not: ActivityStatus.DONE } },
       include: cardInclude,
       orderBy: { dueDate: "asc" }
     })

@@ -24,12 +24,68 @@ enum Priority {
   CRITICAL
 }
 
+model Tenant {
+  id                 String              @id @default(uuid()) @db.Uuid
+  name               String
+  slug               String              @unique
+  active             Boolean             @default(true)
+  portfolios         Portfolio[]
+  projects           Project[]
+  activities         Activity[]
+  idempotencyRecords IdempotencyRecord[]
+  createdAt          DateTime            @default(now()) @map("created_at")
+  updatedAt          DateTime            @updatedAt @map("updated_at")
+
+  @@map("tenants")
+}
+
+model Portfolio {
+  id          String    @id @default(uuid()) @db.Uuid
+  tenantId    String    @map("tenant_id") @db.Uuid
+  tenant      Tenant    @relation(fields: [tenantId], references: [id])
+  name        String
+  description String?
+  active      Boolean   @default(true)
+  projects    Project[]
+  createdAt   DateTime  @default(now()) @map("created_at")
+  updatedAt   DateTime  @updatedAt @map("updated_at")
+
+  @@index([tenantId])
+  @@map("portfolios")
+}
+
+model Project {
+  id          String     @id @default(uuid()) @db.Uuid
+  tenantId    String     @map("tenant_id") @db.Uuid
+  portfolioId String     @map("portfolio_id") @db.Uuid
+  name        String
+  description String?
+  status      String     @default("ACTIVE")
+  health      String?
+  startDate   DateTime?  @map("start_date")
+  targetDate  DateTime?  @map("target_date")
+  ownerId     String?    @map("owner_id") @db.Uuid
+  active      Boolean    @default(true)
+  tenant      Tenant     @relation(fields: [tenantId], references: [id])
+  portfolio   Portfolio  @relation(fields: [portfolioId], references: [id])
+  owner       User?      @relation("OwnedProjects", fields: [ownerId], references: [id], onDelete: SetNull)
+  activities  Activity[]
+  createdAt   DateTime   @default(now()) @map("created_at")
+  updatedAt   DateTime   @updatedAt @map("updated_at")
+
+  @@index([tenantId])
+  @@index([portfolioId])
+  @@index([tenantId, updatedAt])
+  @@map("projects")
+}
+
 model User {
   id                String            @id @default(uuid()) @db.Uuid
   name              String
   email             String            @unique
   passwordHash      String            @map("password_hash")
   avatarUrl         String?           @map("avatar_url")
+  ownedProjects     Project[]         @relation("OwnedProjects")
   assignedActivities Activity[]       @relation("AssigneeActivities")
   createdActivities Activity[]        @relation("CreatedByActivities")
   comments          Comment[]
@@ -42,6 +98,10 @@ model User {
 
 model Activity {
   id             String            @id @default(uuid()) @db.Uuid
+  tenantId       String            @map("tenant_id") @db.Uuid
+  projectId      String            @map("project_id") @db.Uuid
+  tenant         Tenant            @relation(fields: [tenantId], references: [id])
+  project        Project           @relation(fields: [projectId], references: [id])
   title          String
   description    String?
   status         ActivityStatus    @default(BACKLOG)
@@ -62,10 +122,30 @@ model Activity {
   createdAt      DateTime          @default(now()) @map("created_at")
   updatedAt      DateTime          @updatedAt @map("updated_at")
 
+  @@index([tenantId, projectId])
+  @@index([projectId, status])
+  @@index([projectId, assigneeId, status])
+  @@index([projectId, dueDate])
+  @@index([tenantId, updatedAt])
   @@index([status])
   @@index([priority])
   @@index([dueDate])
   @@map("activities")
+}
+
+model IdempotencyRecord {
+  id              String   @id @default(uuid()) @db.Uuid
+  tenantId        String   @map("tenant_id") @db.Uuid
+  tenant          Tenant   @relation(fields: [tenantId], references: [id])
+  key             String
+  operation       String
+  resourceId      String?  @map("resource_id") @db.Uuid
+  responsePayload Json     @map("response_payload")
+  createdAt       DateTime @default(now()) @map("created_at")
+
+  @@unique([tenantId, key])
+  @@index([tenantId, operation])
+  @@map("idempotency_records")
 }
 
 model Tag {

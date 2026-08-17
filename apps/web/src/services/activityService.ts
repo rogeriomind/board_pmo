@@ -2,6 +2,8 @@ import type { Activity, ActivityFilters, ActivityGroups, ActivityStatus, Priorit
 import { apiRequest } from "./api";
 
 export type ActivityPayload = {
+  tenantId?: string | null;
+  projectId?: string | null;
   title: string;
   description?: string | null;
   status?: ActivityStatus;
@@ -16,6 +18,8 @@ function toQuery(filters: ActivityFilters) {
   const params = new URLSearchParams();
 
   if (filters.search) params.set("search", filters.search);
+  if (filters.tenantId) params.set("tenantId", filters.tenantId);
+  if (filters.projectId) params.set("projectId", filters.projectId);
   if (filters.assigneeId) params.set("assigneeId", filters.assigneeId);
   if (filters.priority) params.set("priority", filters.priority);
   if (filters.status) params.set("status", filters.status);

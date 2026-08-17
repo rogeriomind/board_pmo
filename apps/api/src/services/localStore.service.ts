@@ -4,7 +4,54 @@ import { fileURLToPath } from "node:url";
 import { randomUUID } from "node:crypto";
 import bcrypt from "bcryptjs";
 import { ActivityStatus, Priority } from "@prisma/client";
+import {
+  DEFAULT_PORTFOLIO_ID,
+  DEFAULT_PORTFOLIO_NAME,
+  DEFAULT_PROJECT_ID,
+  DEFAULT_PROJECT_NAME,
+  DEFAULT_TENANT_ID,
+  DEFAULT_TENANT_NAME,
+  DEFAULT_TENANT_SLUG,
+  withDefaultPmoScope,
+  type PmoScope,
+  type PmoScopeInput
+} from "../domain/pmoContext.js";
 import { HttpError } from "../utils/httpError.js";
+
+type LocalTenant = {
+  id: string;
+  name: string;
+  slug: string;
+  active: boolean;
+  createdAt: string;
+  updatedAt: string;
+};
+
+type LocalPortfolio = {
+  id: string;
+  tenantId: string;
+  name: string;
+  description: string | null;
+  active: boolean;
+  createdAt: string;
+  updatedAt: string;
+};
+
+type LocalProject = {
+  id: string;
+  tenantId: string;
+  portfolioId: string;
+  name: string;
+  description: string | null;
+  status: string;
+  health: string | null;
+  startDate: string | null;
+  targetDate: string | null;
+  ownerId: string | null;
+  active: boolean;
+  createdAt: string;
+  updatedAt: string;
+};
 
 type LocalUser = {
   id: string;
@@ -25,6 +72,8 @@ type LocalTag = {
 
 type LocalActivity = {
   id: string;
+  tenantId: string;
+  projectId: string;
   title: string;
   description: string | null;
   status: ActivityStatus;
@@ -76,7 +125,20 @@ type LocalHistory = {
   createdAt: string;
 };
 
+type LocalIdempotencyRecord = {
+  id: string;
+  tenantId: string;
+  key: string;
+  operation: string;
+  resourceId: string | null;
+  responsePayload: unknown;
+  createdAt: string;
+};
+
 type LocalStore = {
+  tenants: LocalTenant[];
+  portfolios: LocalPortfolio[];
+  projects: LocalProject[];
   users: LocalUser[];
   tags: LocalTag[];
   activities: LocalActivity[];
@@ -85,11 +147,23 @@ type LocalStore = {
   comments: LocalComment[];
   attachments: LocalAttachment[];
   history: LocalHistory[];
+  idempotencyRecords: LocalIdempotencyRecord[];
+};
+
+type LocalWriteOptions = {
+  scope?: PmoScopeInput;
+  idempotency?: {
+    tenantId: string;
+    key: string;
+    operation: string;
+  };
 };
 
 const currentDir = path.dirname(fileURLToPath(import.meta.url));
 const dataDir = path.resolve(currentDir, "../../data");
-const dataFile = path.join(dataDir, "local-store.json");
+const dataFile = process.env.LOCAL_STORE_FILE
+  ? path.resolve(process.env.LOCAL_STORE_FILE)
+  : path.join(dataDir, "local-store.json");
 const statuses = Object.values(ActivityStatus);
 const tagPalette = ["#6d5dfc", "#0ea5e9", "#10b981", "#f59e0b", "#ef4444", "#8b5cf6", "#14b8a6"];
 
@@ -99,6 +173,125 @@ function now() {
 
 function day(value: string) {
   return new Date(`${value}T12:00:00.000Z`).toISOString();
+}
+
+function defaultTenant(timestamp: string): LocalTenant {
+  return {
+    id: DEFAULT_TENANT_ID,
+    name: DEFAULT_TENANT_NAME,
+    slug: DEFAULT_TENANT_SLUG,
+    active: true,
+    createdAt: timestamp,
+    updatedAt: timestamp
+  };
+}
+
+function defaultPortfolio(timestamp: string): LocalPortfolio {
+  return {
+    id: DEFAULT_PORTFOLIO_ID,
+    tenantId: DEFAULT_TENANT_ID,
+    name: DEFAULT_PORTFOLIO_NAME,
+    description: "Portfolio default para compatibilidade com atividades existentes.",
+    active: true,
+    createdAt: timestamp,
+    updatedAt: timestamp
+  };
+}
+
+function defaultProject(timestamp: string, ownerId?: string | null): LocalProject {
+  return {
+    id: DEFAULT_PROJECT_ID,
+    tenantId: DEFAULT_TENANT_ID,
+    portfolioId: DEFAULT_PORTFOLIO_ID,
+    name: DEFAULT_PROJECT_NAME,
+    description: "Projeto default para compatibilidade com atividades existentes.",
+    status: "ACTIVE",
+    health: null,
+    startDate: null,
+    targetDate: null,
+    ownerId: ownerId ?? null,
+    active: true,
+    createdAt: timestamp,
+    updatedAt: timestamp
+  };
+}
+
+function ensureLocalDomain(store: Partial<LocalStore>): LocalStore {
+  const timestamp = now();
+  const users = store.users ?? [];
+  const tenants = store.tenants?.length ? store.tenants : [defaultTenant(timestamp)];
+  const portfolios = store.portfolios?.length ? store.portfolios : [defaultPortfolio(timestamp)];
+  const projects = store.projects?.length ? store.projects : [defaultProject(timestamp, users[0]?.id ?? null)];
+
+  return {
+    tenants,
+    portfolios,
+    projects,
+    users,
+    tags: store.tags ?? [],
+    activities: (store.activities ?? []).map((activity) => ({
+      ...activity,
+      tenantId: activity.tenantId ?? DEFAULT_TENANT_ID,
+      projectId: activity.projectId ?? DEFAULT_PROJECT_ID
+    })),
+    activityTags: store.activityTags ?? [],
+    checklistItems: store.checklistItems ?? [],
+    comments: store.comments ?? [],
+    attachments: store.attachments ?? [],
+    history: store.history ?? [],
+    idempotencyRecords: store.idempotencyRecords ?? []
+  };
+}
+
+function ensureProject(store: LocalStore, scope: PmoScope) {
+  const project = store.projects.find(
+    (item) => item.id === scope.projectId && item.tenantId === scope.tenantId && item.active
+  );
+
+  if (!project) {
+    throw new HttpError(404, "Projeto nao encontrado para o tenant informado.");
+  }
+
+  return project;
+}
+
+function normalizeWriteOptions(options: LocalWriteOptions | undefined, scope: PmoScope) {
+  if (options?.idempotency && options.idempotency.tenantId !== scope.tenantId) {
+    throw new HttpError(400, "tenantId da idempotencia diverge do tenantId da operacao.");
+  }
+
+  return options;
+}
+
+function readIdempotency(store: LocalStore, options?: LocalWriteOptions) {
+  const idempotency = options?.idempotency;
+  if (!idempotency) return null;
+
+  return (
+    store.idempotencyRecords.find(
+      (record) => record.tenantId === idempotency.tenantId && record.key === idempotency.key
+    ) ?? null
+  );
+}
+
+function writeIdempotency(
+  store: LocalStore,
+  options: LocalWriteOptions | undefined,
+  resourceId: string | null,
+  responsePayload: unknown
+) {
+  const idempotency = options?.idempotency;
+  if (!idempotency) return;
+
+  store.idempotencyRecords.push({
+    id: randomUUID(),
+    tenantId: idempotency.tenantId,
+    key: idempotency.key,
+    operation: idempotency.operation,
+    resourceId,
+    responsePayload,
+    createdAt: now()
+  });
 }
 
 function publicUser(user?: LocalUser | null) {
@@ -177,6 +370,9 @@ async function createSeed(): Promise<LocalStore> {
   ].map(([name, color]) => ({ id: randomUUID(), name, color, createdAt: timestamp }));
 
   const [rogerio, ana, matheus, gabrielle] = users;
+  const tenants = [defaultTenant(timestamp)];
+  const portfolios = [defaultPortfolio(timestamp)];
+  const projects = [defaultProject(timestamp, rogerio.id)];
   const activityTags: LocalStore["activityTags"] = [];
   const checklistItems: LocalChecklistItem[] = [];
   const history: LocalHistory[] = [];
@@ -284,6 +480,8 @@ async function createSeed(): Promise<LocalStore> {
     });
     return {
       id,
+      tenantId: DEFAULT_TENANT_ID,
+      projectId: DEFAULT_PROJECT_ID,
       title: input.title,
       description: input.description,
       status: input.status,
@@ -316,13 +514,28 @@ async function createSeed(): Promise<LocalStore> {
     }
   ];
 
-  return { users, tags, activities, activityTags, checklistItems, comments, attachments: [], history };
+  return {
+    tenants,
+    portfolios,
+    projects,
+    users,
+    tags,
+    activities,
+    activityTags,
+    checklistItems,
+    comments,
+    attachments: [],
+    history,
+    idempotencyRecords: []
+  };
 }
 
 async function readStore() {
   try {
     const raw = await fs.readFile(dataFile, "utf8");
-    return JSON.parse(raw) as LocalStore;
+    const store = ensureLocalDomain(JSON.parse(raw) as Partial<LocalStore>);
+    await writeStore(store);
+    return store;
   } catch {
     const store = await createSeed();
     await writeStore(store);
@@ -374,8 +587,11 @@ function serializeActivity(activity: LocalActivity, store: LocalStore, includeDe
   };
 }
 
-function findActivity(store: LocalStore, id: string) {
-  const activity = store.activities.find((item) => item.id === id);
+function findActivity(store: LocalStore, id: string, scopeInput?: PmoScopeInput) {
+  const scope = withDefaultPmoScope(scopeInput);
+  const activity = store.activities.find(
+    (item) => item.id === id && item.tenantId === scope.tenantId && item.projectId === scope.projectId
+  );
   if (!activity) throw new HttpError(404, "Atividade nao encontrada.");
   return activity;
 }
@@ -428,6 +644,8 @@ export async function listLocalUsers() {
 }
 
 export async function listLocalActivities(filters: {
+  tenantId?: string | null;
+  projectId?: string | null;
   status?: ActivityStatus;
   assigneeId?: string;
   priority?: Priority;
@@ -436,11 +654,14 @@ export async function listLocalActivities(filters: {
   dueDateTo?: string;
 }) {
   const store = await readStore();
+  const scope = withDefaultPmoScope(filters);
   const grouped = emptyGroups();
   const search = filters.search?.toLowerCase();
 
   for (const activity of store.activities) {
     const matches =
+      activity.tenantId === scope.tenantId &&
+      activity.projectId === scope.projectId &&
       (!filters.status || activity.status === filters.status) &&
       (!filters.assigneeId || activity.assigneeId === filters.assigneeId) &&
       (!filters.priority || activity.priority === filters.priority) &&
@@ -462,14 +683,16 @@ export async function listLocalActivities(filters: {
   return grouped;
 }
 
-export async function getLocalActivityById(id: string) {
+export async function getLocalActivityById(id: string, scopeInput?: PmoScopeInput) {
   const store = await readStore();
-  return serializeActivity(findActivity(store, id), store, true);
+  return serializeActivity(findActivity(store, id, scopeInput), store, true);
 }
 
 export async function createLocalActivity(
   userId: string,
   data: {
+    tenantId?: string | null;
+    projectId?: string | null;
     title: string;
     description?: string | null;
     status: ActivityStatus;
@@ -478,12 +701,25 @@ export async function createLocalActivity(
     dueDate?: string | null;
     tags?: string[];
     checklist?: string[];
-  }
+  },
+  options?: LocalWriteOptions
 ) {
   const store = await readStore();
+  const scope = withDefaultPmoScope({
+    tenantId: data.tenantId ?? options?.scope?.tenantId,
+    projectId: data.projectId ?? options?.scope?.projectId
+  });
+  normalizeWriteOptions(options, scope);
+
+  const existing = readIdempotency(store, options);
+  if (existing) return existing.responsePayload;
+
+  ensureProject(store, scope);
   const timestamp = now();
   const activity: LocalActivity = {
     id: randomUUID(),
+    tenantId: scope.tenantId,
+    projectId: scope.projectId,
     title: data.title,
     description: data.description || null,
     status: data.status,
@@ -513,8 +749,10 @@ export async function createLocalActivity(
     });
   }
   addHistory(store, activity.id, userId, "Atividade criada");
+  const response = serializeActivity(activity, store, true);
+  writeIdempotency(store, options, activity.id, response);
   await writeStore(store);
-  return getLocalActivityById(activity.id);
+  return response;
 }
 
 export async function updateLocalActivity(
@@ -528,10 +766,17 @@ export async function updateLocalActivity(
     dueDate?: string | null;
     tags?: string[];
     checklist?: string[];
-  }
+  },
+  options?: LocalWriteOptions
 ) {
   const store = await readStore();
-  const activity = findActivity(store, id);
+  const scope = withDefaultPmoScope(options?.scope);
+  normalizeWriteOptions(options, scope);
+
+  const existing = readIdempotency(store, options);
+  if (existing) return existing.responsePayload;
+
+  const activity = findActivity(store, id, scope);
   const timestamp = now();
 
   if (data.title !== undefined && data.title !== activity.title) {
@@ -611,13 +856,27 @@ export async function updateLocalActivity(
   }
 
   activity.updatedAt = timestamp;
+  const response = serializeActivity(activity, store, true);
+  writeIdempotency(store, options, id, response);
   await writeStore(store);
-  return getLocalActivityById(id);
+  return response;
 }
 
-export async function moveLocalActivity(id: string, userId: string, status: ActivityStatus, reason?: string) {
+export async function moveLocalActivity(
+  id: string,
+  userId: string,
+  status: ActivityStatus,
+  reason?: string,
+  options?: LocalWriteOptions
+) {
   const store = await readStore();
-  const activity = findActivity(store, id);
+  const scope = withDefaultPmoScope(options?.scope);
+  normalizeWriteOptions(options, scope);
+
+  const existing = readIdempotency(store, options);
+  if (existing) return existing.responsePayload;
+
+  const activity = findActivity(store, id, scope);
   const checklist = store.checklistItems.filter((item) => item.activityId === id);
 
   if (status === ActivityStatus.IN_PROGRESS && !activity.assigneeId) {
@@ -658,17 +917,19 @@ export async function moveLocalActivity(id: string, userId: string, status: Acti
     readableStatus(status)
   );
 
+  const response = serializeActivity(activity, store, true);
+  writeIdempotency(store, options, id, response);
   await writeStore(store);
-  return getLocalActivityById(id);
+  return response;
 }
 
-export async function cancelLocalActivity(id: string, userId: string, reason = "Cancelada pelo usuario") {
-  return moveLocalActivity(id, userId, ActivityStatus.CANCELED, reason);
+export async function cancelLocalActivity(id: string, userId: string, reason = "Cancelada pelo usuario", scope?: PmoScopeInput) {
+  return moveLocalActivity(id, userId, ActivityStatus.CANCELED, reason, { scope });
 }
 
-export async function addLocalChecklistItem(activityId: string, userId: string, title: string) {
+export async function addLocalChecklistItem(activityId: string, userId: string, title: string, scopeInput?: PmoScopeInput) {
   const store = await readStore();
-  findActivity(store, activityId);
+  findActivity(store, activityId, scopeInput);
   const item: LocalChecklistItem = {
     id: randomUUID(),
     activityId,
@@ -683,10 +944,17 @@ export async function addLocalChecklistItem(activityId: string, userId: string, 
   return item;
 }
 
-export async function updateLocalChecklistItem(itemId: string, userId: string, data: { title?: string; isDone?: boolean }) {
+export async function updateLocalChecklistItem(
+  itemId: string,
+  userId: string,
+  data: { title?: string; isDone?: boolean },
+  scopeInput?: PmoScopeInput
+) {
   const store = await readStore();
+  const scope = withDefaultPmoScope(scopeInput);
   const item = store.checklistItems.find((current) => current.id === itemId);
   if (!item) throw new HttpError(404, "Item de checklist nao encontrado.");
+  findActivity(store, item.activityId, scope);
   const oldTitle = item.title;
   if (data.title !== undefined) item.title = data.title;
   if (data.isDone !== undefined) item.isDone = data.isDone;
@@ -704,30 +972,46 @@ export async function updateLocalChecklistItem(itemId: string, userId: string, d
   return item;
 }
 
-export async function deleteLocalChecklistItem(itemId: string, userId: string) {
+export async function deleteLocalChecklistItem(itemId: string, userId: string, scopeInput?: PmoScopeInput) {
   const store = await readStore();
+  const scope = withDefaultPmoScope(scopeInput);
   const item = store.checklistItems.find((current) => current.id === itemId);
   if (!item) throw new HttpError(404, "Item de checklist nao encontrado.");
+  findActivity(store, item.activityId, scope);
   store.checklistItems = store.checklistItems.filter((current) => current.id !== itemId);
   addHistory(store, item.activityId, userId, "Item removido do checklist", "checklist", item.title);
   await writeStore(store);
 }
 
-export async function addLocalComment(activityId: string, userId: string, message: string) {
+export async function addLocalComment(
+  activityId: string,
+  userId: string,
+  message: string,
+  options?: LocalWriteOptions
+) {
   const store = await readStore();
-  findActivity(store, activityId);
+  const scope = withDefaultPmoScope(options?.scope);
+  normalizeWriteOptions(options, scope);
+
+  const existing = readIdempotency(store, options);
+  if (existing) return existing.responsePayload;
+
+  findActivity(store, activityId, scope);
   const comment: LocalComment = { id: randomUUID(), activityId, userId, message, createdAt: now() };
   store.comments.push(comment);
   addHistory(store, activityId, userId, "Comentario adicionado");
-  await writeStore(store);
-  return {
+  const response = {
     ...comment,
     user: publicUser(store.users.find((user) => user.id === userId))
   };
+  writeIdempotency(store, options, comment.id, response);
+  await writeStore(store);
+  return response;
 }
 
-export async function listLocalComments(activityId: string) {
+export async function listLocalComments(activityId: string, scopeInput?: PmoScopeInput) {
   const store = await readStore();
+  findActivity(store, activityId, scopeInput);
   return store.comments
     .filter((comment) => comment.activityId === activityId)
     .sort((a, b) => a.createdAt.localeCompare(b.createdAt))
@@ -737,8 +1021,9 @@ export async function listLocalComments(activityId: string) {
     }));
 }
 
-export async function listLocalHistory(activityId: string) {
+export async function listLocalHistory(activityId: string, scopeInput?: PmoScopeInput) {
   const store = await readStore();
+  findActivity(store, activityId, scopeInput);
   return store.history
     .filter((item) => item.activityId === activityId)
     .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
@@ -748,8 +1033,9 @@ export async function listLocalHistory(activityId: string) {
     }));
 }
 
-export async function listLocalAlerts() {
+export async function listLocalAlerts(scopeInput?: PmoScopeInput) {
   const store = await readStore();
+  const scope = withDefaultPmoScope(scopeInput);
   const today = new Date();
   today.setHours(0, 0, 0, 0);
   const inTwoDays = new Date(today);
@@ -759,7 +1045,10 @@ export async function listLocalAlerts() {
   inFiveDays.setDate(today.getDate() + 5);
   inFiveDays.setHours(23, 59, 59, 999);
 
-  const active = store.activities.filter((activity) => activity.status !== ActivityStatus.DONE);
+  const projectActivities = store.activities.filter(
+    (activity) => activity.tenantId === scope.tenantId && activity.projectId === scope.projectId
+  );
+  const active = projectActivities.filter((activity) => activity.status !== ActivityStatus.DONE);
   const byDue = (a: LocalActivity, b: LocalActivity) => (a.dueDate ?? "").localeCompare(b.dueDate ?? "");
   const dueDate = (activity: LocalActivity) => (activity.dueDate ? new Date(activity.dueDate) : null);
 
@@ -778,7 +1067,7 @@ export async function listLocalAlerts() {
       })
       .sort(byDue)
       .map((activity) => serializeActivity(activity, store)),
-    blocked: store.activities
+    blocked: projectActivities
       .filter((activity) => activity.status === ActivityStatus.BLOCKED)
       .map((activity) => serializeActivity(activity, store)),
     withoutAssignee: active
@@ -792,4 +1081,112 @@ export async function listLocalAlerts() {
       .sort(byDue)
       .map((activity) => serializeActivity(activity, store))
   };
+}
+
+export async function listLocalPortfolios(tenantId = DEFAULT_TENANT_ID) {
+  const store = await readStore();
+  return store.portfolios.filter((portfolio) => portfolio.tenantId === tenantId && portfolio.active);
+}
+
+export async function listLocalProjects(input: { tenantId?: string | null; portfolioId?: string | null }) {
+  const store = await readStore();
+  const tenantId = input.tenantId ?? DEFAULT_TENANT_ID;
+  return store.projects.filter(
+    (project) =>
+      project.tenantId === tenantId &&
+      project.active &&
+      (!input.portfolioId || project.portfolioId === input.portfolioId)
+  );
+}
+
+export async function getLocalProject(input: { tenantId?: string | null; projectId: string }) {
+  const store = await readStore();
+  const tenantId = input.tenantId ?? DEFAULT_TENANT_ID;
+  const project = store.projects.find((item) => item.id === input.projectId && item.tenantId === tenantId);
+
+  if (!project) {
+    throw new HttpError(404, "Projeto nao encontrado para o tenant informado.");
+  }
+
+  return project;
+}
+
+export async function createLocalProject(input: {
+  tenantId?: string | null;
+  portfolioId: string;
+  name: string;
+  description?: string | null;
+  status?: string | null;
+  health?: string | null;
+  startDate?: string | null;
+  targetDate?: string | null;
+  ownerId?: string | null;
+  active?: boolean;
+}) {
+  const store = await readStore();
+  const tenantId = input.tenantId ?? DEFAULT_TENANT_ID;
+  const portfolio = store.portfolios.find(
+    (item) => item.id === input.portfolioId && item.tenantId === tenantId && item.active
+  );
+
+  if (!portfolio) {
+    throw new HttpError(404, "Portfolio nao encontrado para o tenant informado.");
+  }
+
+  const timestamp = now();
+  const project: LocalProject = {
+    id: randomUUID(),
+    tenantId,
+    portfolioId: portfolio.id,
+    name: input.name,
+    description: input.description ?? null,
+    status: input.status ?? "ACTIVE",
+    health: input.health ?? null,
+    startDate: input.startDate ? day(input.startDate) : null,
+    targetDate: input.targetDate ? day(input.targetDate) : null,
+    ownerId: input.ownerId ?? null,
+    active: input.active ?? true,
+    createdAt: timestamp,
+    updatedAt: timestamp
+  };
+
+  store.projects.push(project);
+  await writeStore(store);
+  return project;
+}
+
+export async function updateLocalProject(
+  projectId: string,
+  input: {
+    tenantId?: string | null;
+    name?: string;
+    description?: string | null;
+    status?: string | null;
+    health?: string | null;
+    startDate?: string | null;
+    targetDate?: string | null;
+    ownerId?: string | null;
+    active?: boolean;
+  }
+) {
+  const store = await readStore();
+  const tenantId = input.tenantId ?? DEFAULT_TENANT_ID;
+  const project = store.projects.find((item) => item.id === projectId && item.tenantId === tenantId);
+
+  if (!project) {
+    throw new HttpError(404, "Projeto nao encontrado para o tenant informado.");
+  }
+
+  if (input.name !== undefined) project.name = input.name;
+  if (input.description !== undefined) project.description = input.description;
+  if (input.status !== undefined) project.status = input.status ?? "ACTIVE";
+  if (input.health !== undefined) project.health = input.health;
+  if (input.startDate !== undefined) project.startDate = input.startDate ? day(input.startDate) : null;
+  if (input.targetDate !== undefined) project.targetDate = input.targetDate ? day(input.targetDate) : null;
+  if (input.ownerId !== undefined) project.ownerId = input.ownerId;
+  if (input.active !== undefined) project.active = input.active;
+  project.updatedAt = now();
+
+  await writeStore(store);
+  return project;
 }

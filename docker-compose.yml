@@ -48,7 +48,7 @@ services:
       [
         "sh",
         "-c",
-        "npx prisma db push --schema apps/api/prisma/schema.prisma && npm run prisma:seed -w @pmo-board/api && npm run mcp -w @pmo-board/api -- --transport streamable-http --host 0.0.0.0 --port 8011 --path /mcp"
+        "npx prisma migrate deploy --schema apps/api/prisma/schema.prisma && npm run prisma:seed -w @pmo-board/api && npm run mcp -w @pmo-board/api -- --transport streamable-http --host 0.0.0.0 --port 8011 --path /mcp"
       ]
     environment:
       DATABASE_URL: ${DATABASE_URL:-postgresql://pmo:pmo@postgres:5432/pmo_board?schema=public}

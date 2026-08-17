@@ -6,7 +6,11 @@ const dateString = z
   .min(10)
   .regex(/^\d{4}-\d{2}-\d{2}$/, "Use o formato YYYY-MM-DD.");
 
+const optionalUuid = z.string().uuid().optional();
+
 export const activityQuerySchema = z.object({
+  tenantId: optionalUuid,
+  projectId: optionalUuid,
   status: z.nativeEnum(ActivityStatus).optional(),
   assigneeId: z.string().uuid().optional(),
   priority: z.nativeEnum(Priority).optional(),
@@ -16,6 +20,8 @@ export const activityQuerySchema = z.object({
 });
 
 export const activityCreateSchema = z.object({
+  tenantId: optionalUuid.nullable(),
+  projectId: optionalUuid.nullable(),
   title: z.string().trim().min(3, "Titulo deve ter pelo menos 3 caracteres."),
   description: z.string().trim().optional().nullable(),
   status: z.nativeEnum(ActivityStatus).default(ActivityStatus.BACKLOG),
@@ -27,7 +33,7 @@ export const activityCreateSchema = z.object({
 });
 
 export const activityUpdateSchema = activityCreateSchema
-  .omit({ status: true })
+  .omit({ status: true, tenantId: true, projectId: true })
   .partial()
   .refine((value) => Object.keys(value).length > 0, {
     message: "Informe ao menos um campo para atualizar."
