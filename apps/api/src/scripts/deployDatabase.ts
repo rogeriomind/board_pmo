@@ -247,7 +247,7 @@ function runPrismaDbPush() {
   const command = process.platform === "win32" ? "npx.cmd" : "npx";
   const result = spawnSync(
     command,
-    ["prisma", "db", "push", "--schema", "apps/api/prisma/schema.prisma", "--skip-generate"],
+    ["prisma", "db", "push", "--schema", "prisma/schema.prisma", "--skip-generate"],
     {
       stdio: "inherit",
       shell: false
